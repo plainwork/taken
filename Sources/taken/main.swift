@@ -124,6 +124,32 @@ final class NotebookTableView: NSTableView {
     }
 }
 
+final class NotebookSearchField: NSSearchField {
+    var onQuickSelect: ((Int) -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if modifiers.contains(.command), let chars = event.charactersIgnoringModifiers, chars.count == 1 {
+            let key = chars.lowercased()
+            if let index = shortcutIndex(from: key) {
+                onQuickSelect?(index)
+                return
+            }
+        }
+        super.keyDown(with: event)
+    }
+
+    private func shortcutIndex(from key: String) -> Int? {
+        if let digit = Int(key), digit >= 1 && digit <= 9 {
+            return digit - 1
+        }
+        if key == "0" {
+            return 9
+        }
+        return nil
+    }
+}
+
 final class NotebookRowView: NSTableRowView {
     override func drawSelection(in dirtyRect: NSRect) {
         guard selectionHighlightStyle != .none else { return }
@@ -143,11 +169,12 @@ final class NotebookPickerViewController: NSViewController, NSTableViewDataSourc
     private var notebooks: [Notebook] = []
     private var filtered: [Notebook] = []
 
-    private let searchField = NSSearchField(frame: .zero)
+    private let searchField = NotebookSearchField(frame: .zero)
     private let messageLabel = NSTextField(labelWithString: "")
     private let emptyLabel = NSTextField(labelWithString: "No notebooks found.")
     private let tableView = NotebookTableView(frame: .zero)
     private let quitButton = NSButton(title: "Quit", target: nil, action: nil)
+    private var messageClearWorkItem: DispatchWorkItem?
 
     override func loadView() {
         let containerSize = NSSize(width: 320, height: 340)
@@ -156,9 +183,12 @@ final class NotebookPickerViewController: NSViewController, NSTableViewDataSourc
 
         searchField.placeholderString = "Filter notebooks"
         searchField.delegate = self
+        searchField.onQuickSelect = { [weak self] index in
+            self?.selectShortcut(index: index)
+        }
 
         messageLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
-        messageLabel.textColor = .systemRed
+        messageLabel.textColor = .secondaryLabelColor
         messageLabel.stringValue = ""
 
         emptyLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
@@ -245,8 +275,20 @@ final class NotebookPickerViewController: NSViewController, NSTableViewDataSourc
         view.window?.makeFirstResponder(searchField)
     }
 
-    func showMessage(_ message: String) {
+    func showMessage(_ message: String, color: NSColor = .systemRed) {
+        messageClearWorkItem?.cancel()
+        messageLabel.textColor = color
         messageLabel.stringValue = message
+    }
+
+    func showFlashMessage(_ message: String, color: NSColor = .secondaryLabelColor) {
+        showMessage(message, color: color)
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.messageLabel.stringValue = ""
+        }
+        messageClearWorkItem?.cancel()
+        messageClearWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: workItem)
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
@@ -352,7 +394,7 @@ final class NotebookPickerViewController: NSViewController, NSTableViewDataSourc
         return ""
     }
 
-    private func selectShortcut(index: Int) {
+    func selectShortcut(index: Int) {
         guard index >= 0, index < filtered.count else {
             NSSound.beep()
             return
@@ -375,7 +417,7 @@ enum TakenCommandResult {
     case failure(String)
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem?
     private let popover = NSPopover()
     private let pickerController = NotebookPickerViewController()
@@ -383,6 +425,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotKeyRefPicker: EventHotKeyRef?
     private var hotKeyHandlerRef: EventHandlerRef?
     private var hotKeyHandlerUPP: EventHandlerUPP?
+    private var keyMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         configureMainMenu()
@@ -390,10 +433,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pickerController.onSelectNotebook = { [weak self] notebook in
             self?.runTaken(args: [notebook]) { result in
                 if case let .failure(message) = result {
-                    self?.pickerController.showMessage(message)
+                    self?.pickerController.showMessage(message, color: .systemRed)
                     NSSound.beep()
                 } else {
-                    self?.popover.performClose(nil)
+                    self?.pickerController.showFlashMessage("Appended to \(notebook)", color: .secondaryLabelColor)
                 }
             }
         }
@@ -412,6 +455,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = item
 
         popover.behavior = .transient
+        popover.delegate = self
         popover.contentViewController = pickerController
 
         registerGlobalHotKeys()
@@ -431,6 +475,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pickerController.reloadNotebooks()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         pickerController.focusSearch()
+        installKeyMonitorIfNeeded()
     }
 
     private func runTaken(args: [String], completion: @escaping (TakenCommandResult) -> Void) {
@@ -539,6 +584,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         default:
             break
         }
+    }
+
+    private func installKeyMonitorIfNeeded() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, self.popover.isShown else { return event }
+            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if modifiers.contains(.command), let chars = event.charactersIgnoringModifiers, chars.count == 1 {
+                let key = chars.lowercased()
+                if let index = self.shortcutIndex(from: key) {
+                    self.pickerController.selectShortcut(index: index)
+                    return nil
+                }
+            }
+            return event
+        }
+    }
+
+    private func removeKeyMonitor() {
+        if let monitor = keyMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyMonitor = nil
+        }
+    }
+
+    func popoverWillClose(_ notification: Notification) {
+        removeKeyMonitor()
+    }
+
+    private func shortcutIndex(from key: String) -> Int? {
+        if let digit = Int(key), digit >= 1 && digit <= 9 {
+            return digit - 1
+        }
+        if key == "0" {
+            return 9
+        }
+        return nil
     }
 
     static weak var shared: AppDelegate?
