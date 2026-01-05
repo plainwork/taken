@@ -7,14 +7,14 @@ Taken is a tiny menu bar app for appending your clipboard to Taken notebooks.
 Install via Homebrew tap:
 
 ```bash
-brew tap plainwork/taken https://github.com/plainwork/homebrew-taken
-brew install --cask taken
+brew tap plainwork/taken-app https://github.com/plainwork/homebrew-taken-app
+brew install --cask taken-app
 ```
 
 Or install directly:
 
 ```bash
-brew install --cask plainwork/taken/taken
+brew install --cask plainwork/taken-app/taken-app
 ```
 
 ## Use
