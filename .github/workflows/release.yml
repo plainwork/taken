@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build release archive
+        run: ./tools/release.sh
+
+      - name: Compute SHA256
+        id: sha
+        run: |
+          set -e
+          VERSION=$(cat VERSION)
+          ARCHIVE="build/Taken-${VERSION}.zip"
+          SHA=$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/Taken-*.zip
+          body: |
+            SHA256: ${{ steps.sha.outputs.sha }}
+
+      - name: Checkout Homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: plainwork/homebrew-taken-app
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-taken-app
+
+      - name: Update cask
+        run: |
+          set -e
+          VERSION=$(cat VERSION)
+          SHA=${{ steps.sha.outputs.sha }}
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          CASK_FILE="homebrew-taken-app/Casks/taken-app.rb"
+          sed -i.bak "s/^  version \".*\"/  version \"${VERSION}\"/" "$CASK_FILE"
+          sed -i.bak "s/^  sha256 \".*\"/  sha256 \"${SHA}\"/" "$CASK_FILE"
+          rm -f "$CASK_FILE.bak"
+
+      - name: Commit and push cask
+        run: |
+          set -e
+          cd homebrew-taken-app
+          git config user.name "plainwork-bot"
+          git config user.email "actions@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "No cask changes to commit."
+            exit 0
+          fi
+          git add Casks/taken-app.rb
+          git commit -m "taken-app ${VERSION}"
+          git push
